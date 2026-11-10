@@ -36,3 +36,116 @@ sequenceDiagram
     Producer->>Redpanda: Envia msg Key FilialId
     Redpanda-->>Producer: Ack de sucesso
     API-->>Client: Retorna 201 Created
+```
+
+---
+
+### Fluxo 2: Processamento Assíncrono (Consolidation Worker)
+*Consome eventos em background, calcula deltas matemáticos e atualiza o MongoDB.*
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Redpanda as Redpanda
+    participant Worker as KafkaConsolidacaoWorker
+    participant Processor as ConsolidacaoProcessor
+    participant MongoRepo as MongoProjectionRepository
+    participant Mongo as MongoDB
+    participant DLQ as Topico DLQ
+
+    Redpanda->>Worker: Consome EnvelopeEvento
+    Worker->>Processor: Interpreta tipo evento
+    alt Sucesso
+        Processor->>MongoRepo: Envia Deltas
+        MongoRepo->>Mongo: Upsert e Atualizacao Atomica
+        Mongo-->>Worker: Confirmacao
+        Worker->>Redpanda: Commit Offset
+    else Erro Inesperado
+        Processor-->>Worker: Lanca Excecao
+        Worker->>DLQ: Publica mensagem
+        Worker->>Redpanda: Commit Offset 
+    end
+```
+
+---
+
+### Fluxo 3: Consultas de Leitura Otimizadas (CQRS Read APIs)
+*Consultas em milissegundos nas coleções projetadas, sem impacto na base transacional.*
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Dashboard
+    participant ReadConsolidado as API Consolidado
+    participant ReadExtrato as API Extrato
+    participant Mongo as MongoDB
+
+    par Consulta Saldo
+        Client->>ReadConsolidado: GET /api/consolidado
+        ReadConsolidado->>Mongo: Busca O(1) por FilialData
+        Mongo-->>ReadConsolidado: Retorna SaldoDiario
+        ReadConsolidado-->>Client: JSON
+    and Consulta Extrato
+        Client->>ReadExtrato: GET /api/extrato
+        ReadExtrato->>Mongo: Indice Composto
+        Mongo-->>ReadExtrato: Lista ordenada
+        ReadExtrato-->>Client: Array JSON
+    end
+```
+
+---
+
+## 🧩 Topologia do Monorepo
+
+```text
+BancoCarrefour.sln
+│
+├── src/
+│   ├── BuildingBlocks/
+│   │   └── BancoCarrefour.EventBus.Contracts  
+│   ├── WriteService/
+│   │   ├── WriteService.Domain                
+│   │   ├── WriteService.Application           
+│   │   ├── WriteService.Infrastructure        
+│   │   └── WriteService.API                   
+│   ├── ConsolidationWorker/
+│   │   ├── Worker.Domain                      
+│   │   ├── Worker.Application                 
+│   │   ├── Worker.Infrastructure              
+│   │   └── Worker.Host                        
+│   ├── ReadService.Consolidado/
+│   │   └── ReadService.Consolidado.API        
+│   └── ReadService.Extrato/
+│       └── ReadService.Extrato.API            
+│
+└── tests/
+    └── BancoCarrefour.UnitTests               
+```
+
+---
+
+## 🚀 Guia de Operação (GitHub Codespaces / Docker)
+
+### 1. Subir o Ecossistema Completo
+O repositório inclui um `docker-compose.yml` que orquestra Bases de Dados, Mensageria e todos os Microsserviços em .NET:
+```bash
+docker-compose up --build -d
+```
+* **Kafka UI:** Aceda a `http://localhost:8085` para monitorizar eventos.
+* **Keycloak:** Aceda a `http://localhost:8080` para gestão de utilizadores e tokens.
+
+### 2. Dados de Teste Automáticos (Seed)
+Ao iniciar, o PostgreSQL cadastra automaticamente as seguintes informações para testes rápidos:
+* **Filial ID:** `11111111-1111-1111-1111-111111111111` (Carrefour Pinheiros)
+* **Filial ID:** `22222222-2222-2222-2222-222222222222` (Carrefour Dom Pedro)
+* **Tipo Operação (Crédito):** `33333333-3333-3333-3333-333333333333`
+* **Tipo Operação (Débito):** `44444444-4444-4444-4444-444444444444`
+
+### 3. Executando as Aplicações Manualmente (Opcional)
+Se preferir rodar fora do Docker para *debug* no terminal:
+```bash
+dotnet run --project src/WriteService/WriteService.API/WriteService.API.csproj
+dotnet run --project src/ConsolidationWorker/Worker.Host/Worker.Host.csproj
+dotnet run --project src/ReadService.Consolidado/ReadService.Consolidado.API/ReadService.Consolidado.API.csproj
+dotnet run --project src/ReadService.Extrato/ReadService.Extrato.API/ReadService.Extrato.API.csproj
+```
