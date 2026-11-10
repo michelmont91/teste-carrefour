@@ -1,0 +1,27 @@
+<Solution>
+  <Folder Name="/src/" />
+  <Folder Name="/src/BuildingBlocks/">
+    <Project Path="src/BuildingBlocks/BancoCarrefour.EventBus.Contracts/BancoCarrefour.EventBus.Contracts.csproj" />
+  </Folder>
+  <Folder Name="/src/ConsolidationWorker/">
+    <Project Path="src/ConsolidationWorker/Worker.Application/Worker.Application.csproj" />
+    <Project Path="src/ConsolidationWorker/Worker.Domain/Worker.Domain.csproj" />
+    <Project Path="src/ConsolidationWorker/Worker.Host/Worker.Host.csproj" />
+    <Project Path="src/ConsolidationWorker/Worker.Infrastructure/Worker.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/src/ReadService.Consolidado/">
+    <Project Path="src/ReadService.Consolidado/ReadService.Consolidado.API/ReadService.Consolidado.API.csproj" />
+  </Folder>
+  <Folder Name="/src/ReadService.Extrato/">
+    <Project Path="src/ReadService.Extrato/ReadService.Extrato.API/ReadService.Extrato.API.csproj" />
+  </Folder>
+  <Folder Name="/src/WriteService/">
+    <Project Path="src/WriteService/WriteService.API/WriteService.API.csproj" />
+    <Project Path="src/WriteService/WriteService.Application/WriteService.Application.csproj" />
+    <Project Path="src/WriteService/WriteService.Domain/WriteService.Domain.csproj" />
+    <Project Path="src/WriteService/WriteService.Infrastructure/WriteService.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BancoCarrefour.UnitTests/BancoCarrefour.UnitTests.csproj" />
+  </Folder>
+</Solution>
