@@ -1,10 +1,7 @@
-using MongoDB.Bson.Serialization.Attributes;
-
 namespace Worker.Domain.Projections;
 
 public class SaldoDiarioDocument
 {
-    [BsonId]
     public string Id { get; set; } = string.Empty; // Formato: {FilialId}_{YYYY-MM-DD}
     public Guid FilialId { get; set; }
     public string DataConsolidacao { get; set; } = string.Empty;
@@ -16,7 +13,6 @@ public class SaldoDiarioDocument
 
 public class ExtratoLancamentoDocument
 {
-    [BsonId]
     public Guid Id { get; set; }
     public Guid FilialId { get; set; }
     public string DataReferencia { get; set; } = string.Empty;

@@ -72,7 +72,7 @@ services:
       - "8085:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: banco-carrefour-redpanda
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:29092
     networks:
       - carrefour-net
 

@@ -24,6 +24,7 @@ var app = builder.Build();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<ReadService.Consolidado.API.Middlewares.AuthenticationContextMiddleware>();
 
 app.MapConsolidadoEndpoints();
 
