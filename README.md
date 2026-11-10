@@ -38,59 +38,44 @@ sequenceDiagram
     API-->>Client: Retorna 201/200 OK
     sequenceDiagram
     autonumber
-    actor Client as "Cliente / Dashboard"
-    participant ReadConsolidado as "API Consolidado"
-    participant ReadExtrato as "API Extrato"
-    participant Mongo as "MongoDB"
+    participant Redpanda as "Redpanda (Tópico)"
+    participant Worker as "KafkaConsolidacaoWorker"
+    participant Processor as "ConsolidacaoProcessor"
+    participant MongoRepo as "MongoProjectionRepository"
+    participant Mongo as "MongoDB (Leitura)"
+    participant DLQ as "Tópico DLQ"
 
-    par Consulta de Saldo Consolidado
-        Client->>ReadConsolidado: GET /api/consolidado/{id}?data=YYYY-MM-DD
-        ReadConsolidado->>Mongo: Busca O(1) por ID composto (Filial_Data)
-        Mongo-->>ReadConsolidado: Retorna SaldoDiario
-        ReadConsolidado-->>Client: Retorna JSON
-    and Consulta de Extrato Analítico
-        Client->>ReadExtrato: GET /api/extrato/{id}?data=YYYY-MM-DD
-        ReadExtrato->>Mongo: Consulta por Índice Composto (Data/Filial)
-        Mongo-->>ReadExtrato: Retorna lista ordenada
-        ReadExtrato-->>Client: Retorna Array JSON
+    Redpanda->>Worker: Consome EnvelopeEvento
+    Worker->>Processor: Interpreta tipo de evento
+    alt Sucesso no Processamento
+        Processor->>MongoRepo: Envia Inserção/Atualização & Deltas
+        MongoRepo->>Mongo: Upsert Extrato & Atualização Atômica de Saldo
+        Mongo-->>Worker: Confirmação de persistência
+        Worker->>Redpanda: Commit Offset
+    else Erro Inesperado
+        Processor-->>Worker: Lança Exceção
+        Worker->>DLQ: Publica mensagem na DLQ
+        Worker->>Redpanda: Commit Offset (Evita travamento)
     end
     sequenceDiagram
     autonumber
-    actor Client as "Cliente / Dashboard"
-    participant ReadConsolidado as "API Consolidado"
-    participant ReadExtrato as "API Extrato"
-    participant Mongo as "MongoDB"
+    participant Redpanda as "Redpanda (Tópico)"
+    participant Worker as "KafkaConsolidacaoWorker"
+    participant Processor as "ConsolidacaoProcessor"
+    participant MongoRepo as "MongoProjectionRepository"
+    participant Mongo as "MongoDB (Leitura)"
+    participant DLQ as "Tópico DLQ"
 
-    par Consulta de Saldo Consolidado
-        Client->>ReadConsolidado: GET /api/consolidado/{id}?data=YYYY-MM-DD
-        ReadConsolidado->>Mongo: Busca O(1) por ID composto (Filial_Data)
-        Mongo-->>ReadConsolidado: Retorna SaldoDiario
-        ReadConsolidado-->>Client: Retorna JSON
-    and Consulta de Extrato Analítico
-        Client->>ReadExtrato: GET /api/extrato/{id}?data=YYYY-MM-DD
-        ReadExtrato->>Mongo: Consulta por Índice Composto (Data/Filial)
-        Mongo-->>ReadExtrato: Retorna lista ordenada
-        ReadExtrato-->>Client: Retorna Array JSON
+    Redpanda->>Worker: Consome EnvelopeEvento
+    Worker->>Processor: Interpreta tipo de evento
+    alt Sucesso no Processamento
+        Processor->>MongoRepo: Envia Inserção/Atualização & Deltas
+        MongoRepo->>Mongo: Upsert Extrato & Atualização Atômica de Saldo
+        Mongo-->>Worker: Confirmação de persistência
+        Worker->>Redpanda: Commit Offset
+    else Erro Inesperado
+        Processor-->>Worker: Lança Exceção
+        Worker->>DLQ: Publica mensagem na DLQ
+        Worker->>Redpanda: Commit Offset (Evita travamento)
     end
-    BancoCarrefour.sln
-│
-├── src/
-│   ├── BuildingBlocks/
-│   │   └── BancoCarrefour.EventBus.Contracts  # Contratos de Eventos Partilhados
-│   ├── WriteService/
-│   │   ├── WriteService.Domain                # Entidades, Invariantes e Portas (Interfaces)
-│   │   ├── WriteService.Application           # Use Cases de Comandos de Escrita
-│   │   ├── WriteService.Infrastructure        # Adaptadores: PostgreSQL (EF Core) e Kafka
-│   │   └── WriteService.API                   # Endpoints Limpos e Middleware JWT
-│   ├── ConsolidationWorker/
-│   │   ├── Worker.Domain                      # Modelos de Projeção e Portas
-│   │   ├── Worker.Application                 # Processador Matemático de Deltas
-│   │   ├── Worker.Infrastructure              # Repositório MongoDB e Background Service
-│   │   └── Worker.Host                        # Host Genérico .NET
-│   ├── ReadService.Consolidado/
-│   │   └── ReadService.Consolidado.API        # Hexagonal: Domínio, Queries, Infra e Endpoints
-│   └── ReadService.Extrato/
-│       └── ReadService.Extrato.API            # Hexagonal: Domínio, Queries, Infra e Endpoints
-│
-└── tests/
-    └── BancoCarrefour.UnitTests               # Suíte de Testes Unitários e Mocks
+    
