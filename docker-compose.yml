@@ -1,6 +1,9 @@
 version: '3.8'
 
 services:
+  # ==========================================
+  # INFRAESTRUTURA
+  # ==========================================
   postgres:
     image: postgres:16-alpine
     container_name: bc-postgres
@@ -85,6 +88,9 @@ services:
     networks:
       - carrefour-net
 
+  # ==========================================
+  # MICROSSERVIÇOS .NET
+  # ==========================================
   writeservice.api:
     build:
       context: .
