@@ -21,61 +21,18 @@ Arquitetura de microsserviços de alta performance, resiliente, transacional e o
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as "Cliente / PDV"
-    participant API as "WriteService.API"
-    participant Svc as "LancamentoCommandService"
-    participant DB as "PostgreSQL (ACID)"
-    participant Producer as "KafkaEventProducer"
-    participant Redpanda as "Redpanda"
+    actor Client as Cliente PDV
+    participant API as WriteService.API
+    participant Svc as LancamentoCommandService
+    participant DB as PostgreSQL
+    participant Producer as KafkaEventProducer
+    participant Redpanda as Redpanda
 
-    Client->>API: POST /api/lancamentos (JWT)
-    API->>Svc: Executa comando (Criar/Editar)
-    Svc->>DB: Valida regras e salva Lançamento
-    DB-->>Svc: Confirma transação (Commit)
+    Client->>API: POST /api/lancamentos
+    API->>Svc: Executa comando
+    Svc->>DB: Valida e salva Lancamento
+    DB-->>Svc: Confirma transacao ACID
     Svc->>Producer: Publica EnvelopeEvento
-    Producer->>Redpanda: Envia mensagem (Key: FilialId)
+    Producer->>Redpanda: Envia msg Key FilialId
     Redpanda-->>Producer: Ack de sucesso
-    API-->>Client: Retorna 201/200 OK
-    sequenceDiagram
-    autonumber
-    participant Redpanda as "Redpanda (Tópico)"
-    participant Worker as "KafkaConsolidacaoWorker"
-    participant Processor as "ConsolidacaoProcessor"
-    participant MongoRepo as "MongoProjectionRepository"
-    participant Mongo as "MongoDB (Leitura)"
-    participant DLQ as "Tópico DLQ"
-
-    Redpanda->>Worker: Consome EnvelopeEvento
-    Worker->>Processor: Interpreta tipo de evento
-    alt Sucesso no Processamento
-        Processor->>MongoRepo: Envia Inserção/Atualização & Deltas
-        MongoRepo->>Mongo: Upsert Extrato & Atualização Atômica de Saldo
-        Mongo-->>Worker: Confirmação de persistência
-        Worker->>Redpanda: Commit Offset
-    else Erro Inesperado
-        Processor-->>Worker: Lança Exceção
-        Worker->>DLQ: Publica mensagem na DLQ
-        Worker->>Redpanda: Commit Offset (Evita travamento)
-    end
-    sequenceDiagram
-    autonumber
-    participant Redpanda as "Redpanda (Tópico)"
-    participant Worker as "KafkaConsolidacaoWorker"
-    participant Processor as "ConsolidacaoProcessor"
-    participant MongoRepo as "MongoProjectionRepository"
-    participant Mongo as "MongoDB (Leitura)"
-    participant DLQ as "Tópico DLQ"
-
-    Redpanda->>Worker: Consome EnvelopeEvento
-    Worker->>Processor: Interpreta tipo de evento
-    alt Sucesso no Processamento
-        Processor->>MongoRepo: Envia Inserção/Atualização & Deltas
-        MongoRepo->>Mongo: Upsert Extrato & Atualização Atômica de Saldo
-        Mongo-->>Worker: Confirmação de persistência
-        Worker->>Redpanda: Commit Offset
-    else Erro Inesperado
-        Processor-->>Worker: Lança Exceção
-        Worker->>DLQ: Publica mensagem na DLQ
-        Worker->>Redpanda: Commit Offset (Evita travamento)
-    end
-    
+    API-->>Client: Retorna 201 Created
