@@ -1,41 +1,46 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using WriteService.API.Endpoints;
+using WriteService.API.Middlewares;
+using WriteService.Application.UseCases;
+using WriteService.Domain.Ports;
+using WriteService.Infrastructure.Adapters;
+using WriteService.Infrastructure.Persistence;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+builder.Services.AddDbContext<WriteDbContext>(opt =>
+    opt.UseNpgsql(builder.Configuration.GetConnectionString("Postgres") 
+        ?? "Host=postgres;Port=5432;Database=fluxo_caixa_db;Username=admin;Password=adminpassword"));
+
+builder.Services.AddScoped<ILancamentoRepository, LancamentoRepository>();
+builder.Services.AddSingleton<IEventProducer, KafkaEventProducer>();
+builder.Services.AddScoped<LancamentoCommandService>();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(opt =>
+    {
+        opt.Authority = builder.Configuration["Keycloak:Authority"] ?? "http://localhost:8080/realms/banco-carrefour";
+        opt.RequireHttpsMetadata = false;
+        opt.TokenValidationParameters.ValidateAudience = false;
+    });
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("writer", p => p.RequireRole("writer", "admin"))
+    .AddPolicy("admin", p => p.RequireRole("admin"));
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+using (var scope = app.Services.CreateScope())
 {
-    app.MapOpenApi();
+    var db = scope.ServiceProvider.GetRequiredService<WriteDbContext>();
+    db.Database.EnsureCreated();
 }
 
-app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseMiddleware<AuthenticationContextMiddleware>();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+app.MapLancamentoEndpoints();
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
