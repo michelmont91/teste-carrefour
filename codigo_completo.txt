@@ -1,0 +1,1449 @@
+=== REVISÃO DO CÓDIGO - BANCO CARREFOUR ===
+
+
+========================================================
+FILE: ./docker-compose.yml
+========================================================
+
+version: '3.8'
+
+services:
+  # ==========================================
+  # INFRAESTRUTURA
+  # ==========================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: bc-postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: fluxo_caixa_db
+    ports:
+      - "5432:5432"
+    networks:
+      - carrefour-net
+
+  mongodb:
+    image: mongo:7.0
+    container_name: bc-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: adminpassword
+    ports:
+      - "27017:27017"
+    networks:
+      - carrefour-net
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.3
+    container_name: bc-redpanda
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    networks:
+      - carrefour-net
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.3
+    container_name: bc-redpanda-init
+    depends_on:
+      - redpanda
+    entrypoint: [ "/bin/sh", "-c" ]
+    command: |
+      "
+      echo 'Aguardando o Redpanda iniciar...'
+      sleep 5
+      rpk topic create lancamentos-eventos --brokers redpanda:29092 --partitions 3 --replicas 1 || true
+      rpk topic create lancamentos-dlq --brokers redpanda:29092 --partitions 1 --replicas 1 || true
+      echo 'Topicos criados com sucesso!'
+      "
+    networks:
+      - carrefour-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: bc-kafka-ui
+    depends_on:
+      - redpanda
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: banco-carrefour-redpanda
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:29092
+    networks:
+      - carrefour-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: bc-keycloak
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    networks:
+      - carrefour-net
+
+  # ==========================================
+  # MICROSSERVIÇOS .NET
+  # ==========================================
+  writeservice.api:
+    build:
+      context: .
+      dockerfile: src/WriteService/WriteService.API/Dockerfile
+    container_name: bc-writeservice-api
+    depends_on:
+      - postgres
+      - redpanda
+    ports:
+      - "5001:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=fluxo_caixa_db;Username=admin;Password=adminpassword
+      - Kafka__BootstrapServers=redpanda:29092
+      - Kafka__Topic=lancamentos-eventos
+      - Keycloak__Authority=http://keycloak:8080/realms/banco-carrefour
+    networks:
+      - carrefour-net
+
+  consolidation.worker:
+    build:
+      context: .
+      dockerfile: src/ConsolidationWorker/Worker.Host/Dockerfile
+    container_name: bc-consolidation-worker
+    depends_on:
+      - mongodb
+      - redpanda
+    environment:
+      - DOTNET_ENVIRONMENT=Development
+      - ConnectionStrings__MongoDb=mongodb://admin:adminpassword@mongodb:27017
+      - Kafka__BootstrapServers=redpanda:29092
+      - Kafka__Topic=lancamentos-eventos
+      - Kafka__DlqTopic=lancamentos-dlq
+    networks:
+      - carrefour-net
+
+  readservice.consolidado.api:
+    build:
+      context: .
+      dockerfile: src/ReadService.Consolidado/ReadService.Consolidado.API/Dockerfile
+    container_name: bc-read-consolidado-api
+    depends_on:
+      - mongodb
+    ports:
+      - "5002:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__MongoDb=mongodb://admin:adminpassword@mongodb:27017
+      - Keycloak__Authority=http://keycloak:8080/realms/banco-carrefour
+    networks:
+      - carrefour-net
+
+  readservice.extrato.api:
+    build:
+      context: .
+      dockerfile: src/ReadService.Extrato/ReadService.Extrato.API/Dockerfile
+    container_name: bc-read-extrato-api
+    depends_on:
+      - mongodb
+    ports:
+      - "5003:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__MongoDb=mongodb://admin:adminpassword@mongodb:27017
+      - Keycloak__Authority=http://keycloak:8080/realms/banco-carrefour
+    networks:
+      - carrefour-net
+
+networks:
+  carrefour-net:
+    driver: bridge
+
+========================================================
+FILE: ./src/BuildingBlocks/BancoCarrefour.EventBus.Contracts/BancoCarrefour.EventBus.Contracts.csproj
+========================================================
+
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
+
+
+========================================================
+FILE: ./src/BuildingBlocks/BancoCarrefour.EventBus.Contracts/Class1.cs
+========================================================
+
+﻿namespace BancoCarrefour.EventBus.Contracts;
+
+public class Class1
+{
+
+}
+
+
+========================================================
+FILE: ./src/ConsolidationWorker/Worker.Application/Services/ConsolidacaoProcessor.cs
+========================================================
+
+using System.Text.Json;
+using BancoCarrefour.EventBus.Contracts;
+using Worker.Domain.Projections;
+
+namespace Worker.Application.Services;
+
+public class ConsolidacaoProcessor(IProjectionRepository repository)
+{
+    public async Task ProcessarEnvelopeAsync(EnvelopeEvento envelope, CancellationToken ct = default)
+    {
+        switch (envelope.EventType)
+        {
+            case nameof(LancamentoCriadoEvent):
+                var criado = JsonSerializer.Deserialize<LancamentoCriadoEvent>(envelope.PayloadJson)
+                    ?? throw new InvalidOperationException("Payload LancamentoCriadoEvent invalido.");
+                await ProcessarCriadoAsync(criado, ct);
+                break;
+
+            case nameof(LancamentoEditadoEvent):
+                var editado = JsonSerializer.Deserialize<LancamentoEditadoEvent>(envelope.PayloadJson)
+                    ?? throw new InvalidOperationException("Payload LancamentoEditadoEvent invalido.");
+                await ProcessarEditadoAsync(editado, ct);
+                break;
+
+            default:
+                throw new NotSupportedException($"Tipo de evento desconhecido: {envelope.EventType}");
+        }
+    }
+
+    private async Task ProcessarCriadoAsync(LancamentoCriadoEvent ev, CancellationToken ct)
+    {
+        var dataRef = ev.DataLancamentoUtc.ToString("yyyy-MM-dd");
+        var deltaCredito = ev.TipoOperacao == TipoOperacaoEvento.Credito ? ev.Valor : 0m;
+        var deltaDebito = ev.TipoOperacao == TipoOperacaoEvento.Debito ? ev.Valor : 0m;
+
+        var doc = new ExtratoLancamentoDocument
+        {
+            Id = ev.Id,
+            FilialId = ev.FilialId,
+            DataReferencia = dataRef,
+            DataLancamento = ev.DataLancamentoUtc,
+            Valor = ev.Valor,
+            TipoOperacao = (int)ev.TipoOperacao,
+            Descricao = ev.Descricao,
+            UsuarioId = ev.UsuarioId
+        };
+
+        await repository.ProcessarCriacaoAsync(doc, deltaCredito, deltaDebito, ct);
+    }
+
+    private async Task ProcessarEditadoAsync(LancamentoEditadoEvent ev, CancellationToken ct)
+    {
+        var dataRef = ev.DataLancamentoOriginalUtc.ToString("yyyy-MM-dd");
+        decimal deltaCredito = 0m;
+        decimal deltaDebito = 0m;
+
+        // Estorno do valor anterior
+        if (ev.TipoOperacaoAnterior == TipoOperacaoEvento.Credito) deltaCredito -= ev.ValorAnterior;
+        else deltaDebito -= ev.ValorAnterior;
+
+        // Aplicação do novo valor
+        if (ev.TipoOperacaoNovo == TipoOperacaoEvento.Credito) deltaCredito += ev.ValorNovo;
+        else deltaDebito += ev.ValorNovo;
+
+        await repository.ProcessarEdicaoAsync(
+            ev.Id, ev.FilialId, dataRef, 
+            ev.ValorNovo, (int)ev.TipoOperacaoNovo, ev.NovaDescricao, 
+            deltaCredito, deltaDebito, ct);
+    }
+}
+
+
+========================================================
+FILE: ./src/ConsolidationWorker/Worker.Domain/Projections/ReadProjections.cs
+========================================================
+
+namespace Worker.Domain.Projections;
+
+public class SaldoDiarioDocument
+{
+    public string Id { get; set; } = string.Empty; // Formato: {FilialId}_{YYYY-MM-DD}
+    public Guid FilialId { get; set; }
+    public string DataConsolidacao { get; set; } = string.Empty;
+    public decimal TotalCreditos { get; set; }
+    public decimal TotalDebitos { get; set; }
+    public decimal SaldoFinal { get; set; }
+    public DateTime UltimaAtualizacao { get; set; }
+}
+
+public class ExtratoLancamentoDocument
+{
+    public Guid Id { get; set; }
+    public Guid FilialId { get; set; }
+    public string DataReferencia { get; set; } = string.Empty;
+    public DateTime DataLancamento { get; set; }
+    public decimal Valor { get; set; }
+    public int TipoOperacao { get; set; }
+    public string Descricao { get; set; } = string.Empty;
+    public string UsuarioId { get; set; } = string.Empty;
+}
+
+public interface IProjectionRepository
+{
+    Task ProcessarCriacaoAsync(ExtratoLancamentoDocument lancamento, decimal deltaCredito, decimal deltaDebito, CancellationToken ct = default);
+    Task ProcessarEdicaoAsync(Guid lancamentoId, Guid filialId, string dataRef, decimal novoValor, int novoTipo, string novaDescricao, decimal deltaCredito, decimal deltaDebito, CancellationToken ct = default);
+}
+
+
+========================================================
+FILE: ./src/ConsolidationWorker/Worker.Host/Program.cs
+========================================================
+
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Worker.Application.Services;
+using Worker.Domain.Projections;
+using Worker.Infrastructure.Persistence;
+using Worker.Infrastructure.Messaging;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+// Registo de Portas e Adaptadores (Arquitetura Hexagonal)
+builder.Services.AddSingleton<IProjectionRepository, MongoProjectionRepository>();
+builder.Services.AddSingleton<ConsolidacaoProcessor>();
+builder.Services.AddHostedService<KafkaConsolidacaoWorker>();
+
+var host = builder.Build();
+host.Run();
+
+
+========================================================
+FILE: ./src/ConsolidationWorker/Worker.Infrastructure/Messaging/KafkaConsolidacaoWorker.cs
+========================================================
+
+using System.Text.Json;
+using BancoCarrefour.EventBus.Contracts;
+using Confluent.Kafka;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Worker.Application.Services;
+
+namespace Worker.Infrastructure.Messaging;
+
+public class KafkaConsolidacaoWorker(
+    IConfiguration config,
+    ILogger<KafkaConsolidacaoWorker> logger,
+    ConsolidacaoProcessor processor) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var bootstrapServers = config["Kafka:BootstrapServers"] ?? "localhost:9092";
+        var mainTopic = config["Kafka:Topic"] ?? "lancamentos-eventos";
+        var dlqTopic = config["Kafka:DlqTopic"] ?? "lancamentos-dlq";
+
+        var consumerConfig = new ConsumerConfig
+        {
+            BootstrapServers = bootstrapServers,
+            GroupId = "consolidacao-worker-group",
+            AutoOffsetReset = AutoOffsetReset.Earliest,
+            EnableAutoCommit = false
+        };
+
+        using var consumer = new ConsumerBuilder<string, string>(consumerConfig).Build();
+        using var dlqProducer = new ProducerBuilder<string, string>(new ProducerConfig { BootstrapServers = bootstrapServers }).Build();
+
+        consumer.Subscribe(mainTopic);
+        logger.LogInformation("KafkaConsolidacaoWorker subscrito ao topico {Topic} com sucesso.", mainTopic);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var result = consumer.Consume(stoppingToken);
+            if (result?.Message == null) continue;
+
+            try
+            {
+                var envelope = JsonSerializer.Deserialize<EnvelopeEvento>(result.Message.Value)
+                    ?? throw new InvalidOperationException("Envelope nulo ou invalido.");
+
+                await processor.ProcessarEnvelopeAsync(envelope, stoppingToken);
+                consumer.Commit(result);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Erro ao consolidar mensagem da chave {Key}. Enviando para DLQ ({DlqTopic}).", result.Message.Key, dlqTopic);
+
+                await dlqProducer.ProduceAsync(dlqTopic, new Message<string, string>
+                {
+                    Key = result.Message.Key,
+                    Value = result.Message.Value
+                }, stoppingToken);
+
+                consumer.Commit(result);
+            }
+        }
+    }
+}
+
+
+========================================================
+FILE: ./src/ConsolidationWorker/Worker.Infrastructure/Persistence/MongoProjectionRepository.cs
+========================================================
+
+using Microsoft.Extensions.Configuration;
+using MongoDB.Bson.Serialization;
+using MongoDB.Driver;
+using Worker.Domain.Projections;
+
+namespace Worker.Infrastructure.Persistence;
+
+public class MongoProjectionRepository : IProjectionRepository
+{
+    private readonly IMongoCollection<SaldoDiarioDocument> _saldos;
+    private readonly IMongoCollection<ExtratoLancamentoDocument> _extratos;
+
+    static MongoProjectionRepository()
+    {
+        if (!BsonClassMap.IsClassMapRegistered(typeof(SaldoDiarioDocument)))
+        {
+            BsonClassMap.RegisterClassMap<SaldoDiarioDocument>(cm =>
+            {
+                cm.AutoMap();
+                cm.MapIdMember(c => c.Id);
+            });
+        }
+
+        if (!BsonClassMap.IsClassMapRegistered(typeof(ExtratoLancamentoDocument)))
+        {
+            BsonClassMap.RegisterClassMap<ExtratoLancamentoDocument>(cm =>
+            {
+                cm.AutoMap();
+                cm.MapIdMember(c => c.Id);
+            });
+        }
+    }
+
+    public MongoProjectionRepository(IConfiguration config)
+    {
+        var connString = config.GetConnectionString("MongoDb") ?? "mongodb://admin:adminpassword@localhost:27017";
+        var client = new MongoClient(connString);
+        var db = client.GetDatabase("fluxo_caixa_read_db");
+
+        _saldos = db.GetCollection<SaldoDiarioDocument>("SaldosDiarios");
+        _extratos = db.GetCollection<ExtratoLancamentoDocument>("ExtratoLancamentos");
+
+        // Garante Índice Composto para consultas rápidas de Extrato
+        var indexKeys = Builders<ExtratoLancamentoDocument>.IndexKeys
+            .Ascending(x => x.FilialId)
+            .Ascending(x => x.DataReferencia)
+            .Descending(x => x.DataLancamento);
+        _extratos.Indexes.CreateOne(new CreateIndexModel<ExtratoLancamentoDocument>(indexKeys));
+    }
+
+    public async Task ProcessarCriacaoAsync(ExtratoLancamentoDocument lancamento, decimal deltaCredito, decimal deltaDebito, CancellationToken ct = default)
+    {
+        // Idempotência: substitui ou insere no extrato
+        await _extratos.ReplaceOneAsync(
+            x => x.Id == lancamento.Id,
+            lancamento,
+            new ReplaceOptions { IsUpsert = true },
+            ct);
+
+        await AtualizarSaldoAtomicoAsync(lancamento.FilialId, lancamento.DataReferencia, deltaCredito, deltaDebito, ct);
+    }
+
+    public async Task ProcessarEdicaoAsync(Guid lancamentoId, Guid filialId, string dataRef, decimal novoValor, int novoTipo, string novaDescricao, decimal deltaCredito, decimal deltaDebito, CancellationToken ct = default)
+    {
+        var updateExtrato = Builders<ExtratoLancamentoDocument>.Update
+            .Set(x => x.Valor, novoValor)
+            .Set(x => x.TipoOperacao, novoTipo)
+            .Set(x => x.Descricao, novaDescricao);
+
+        await _extratos.UpdateOneAsync(x => x.Id == lancamentoId, updateExtrato, cancellationToken: ct);
+        await AtualizarSaldoAtomicoAsync(filialId, dataRef, deltaCredito, deltaDebito, ct);
+    }
+
+    private async Task AtualizarSaldoAtomicoAsync(Guid filialId, string dataRef, decimal deltaCredito, decimal deltaDebito, CancellationToken ct)
+    {
+        var saldoId = $"{filialId}_{dataRef}";
+        var deltaLiquido = deltaCredito - deltaDebito;
+
+        var updateSaldo = Builders<SaldoDiarioDocument>.Update
+            .SetOnInsert(x => x.Id, saldoId)
+            .SetOnInsert(x => x.FilialId, filialId)
+            .SetOnInsert(x => x.DataConsolidacao, dataRef)
+            .Inc(x => x.TotalCreditos, deltaCredito)
+            .Inc(x => x.TotalDebitos, deltaDebito)
+            .Inc(x => x.SaldoFinal, deltaLiquido)
+            .Set(x => x.UltimaAtualizacao, DateTime.UtcNow);
+
+        await _saldos.UpdateOneAsync(
+            x => x.Id == saldoId,
+            updateSaldo,
+            new UpdateOptions { IsUpsert = true },
+            ct);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Consolidado/ReadService.Consolidado.API/Application/Queries/ObterSaldoConsolidadoQueryHandler.cs
+========================================================
+
+using ReadService.Consolidado.API.Domain;
+
+namespace ReadService.Consolidado.API.Application.Queries;
+
+public class ObterSaldoConsolidadoQueryHandler(IConsolidadoQueryRepository repository)
+{
+    public async Task<SaldoDiarioReadModel> ExecutarAsync(Guid filialId, string data, CancellationToken ct = default)
+    {
+        var saldo = await repository.ObterPorFilialEDataAsync(filialId, data, ct);
+
+        if (saldo is null)
+        {
+            return new SaldoDiarioReadModel
+            {
+                Id = $"{filialId}_{data}",
+                FilialId = filialId,
+                DataConsolidacao = data,
+                TotalCreditos = 0m,
+                TotalDebitos = 0m,
+                SaldoFinal = 0m,
+                UltimaAtualizacao = DateTime.UtcNow
+            };
+        }
+
+        return saldo;
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Consolidado/ReadService.Consolidado.API/Domain/ConsolidadoReadModel.cs
+========================================================
+
+using MongoDB.Bson.Serialization.Attributes;
+
+namespace ReadService.Consolidado.API.Domain;
+
+public class SaldoDiarioReadModel
+{
+    [BsonId]
+    public string Id { get; set; } = string.Empty;
+    public Guid FilialId { get; set; }
+    public string DataConsolidacao { get; set; } = string.Empty;
+    public decimal TotalCreditos { get; set; }
+    public decimal TotalDebitos { get; set; }
+    public decimal SaldoFinal { get; set; }
+    public DateTime UltimaAtualizacao { get; set; }
+}
+
+public interface IConsolidadoQueryRepository
+{
+    Task<SaldoDiarioReadModel?> ObterPorFilialEDataAsync(Guid filialId, string data, CancellationToken ct = default);
+}
+
+
+========================================================
+FILE: ./src/ReadService.Consolidado/ReadService.Consolidado.API/Endpoints/ConsolidadoEndpoints.cs
+========================================================
+
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using ReadService.Consolidado.API.Application.Queries;
+using ReadService.Consolidado.API.Domain;
+
+namespace ReadService.Consolidado.API.Endpoints;
+
+public static class ConsolidadoEndpoints
+{
+    public static void MapConsolidadoEndpoints(this IEndpointRouteBuilder endpoints)
+    {
+        endpoints.MapGet("/api/consolidado/{filialId:guid}", ObterSaldoConsolidadoAsync)
+            .RequireAuthorization("read")
+            .WithTags("Consultas - Saldos Consolidados")
+            .Produces<SaldoDiarioReadModel>(StatusCodes.Status200OK)
+            .Produces(StatusCodes.Status400BadRequest);
+    }
+
+    private static async Task<IResult> ObterSaldoConsolidadoAsync(
+        Guid filialId,
+        string data,
+        ObterSaldoConsolidadoQueryHandler queryHandler,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(data))
+            return Results.BadRequest(new { mensagem = "O parametro 'data' (formato YYYY-MM-DD) e obrigatorio." });
+
+        var resultado = await queryHandler.ExecutarAsync(filialId, data, ct);
+        return Results.Ok(resultado);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Consolidado/ReadService.Consolidado.API/Infrastructure/MongoConsolidadoRepository.cs
+========================================================
+
+using Microsoft.Extensions.Configuration;
+using MongoDB.Driver;
+using ReadService.Consolidado.API.Domain;
+
+namespace ReadService.Consolidado.API.Infrastructure;
+
+public class MongoConsolidadoRepository : IConsolidadoQueryRepository
+{
+    private readonly IMongoCollection<SaldoDiarioReadModel> _collection;
+
+    public MongoConsolidadoRepository(IConfiguration config)
+    {
+        var client = new MongoClient(config.GetConnectionString("MongoDb") ?? "mongodb://admin:adminpassword@localhost:27017");
+        var db = client.GetDatabase("fluxo_caixa_read_db");
+        _collection = db.GetCollection<SaldoDiarioReadModel>("SaldosDiarios");
+    }
+
+    public async Task<SaldoDiarioReadModel?> ObterPorFilialEDataAsync(Guid filialId, string data, CancellationToken ct = default)
+    {
+        var docId = $"{filialId}_{data}";
+        return await _collection.Find(x => x.Id == docId).FirstOrDefaultAsync(ct);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Consolidado/ReadService.Consolidado.API/Middlewares/AuthenticationContextMiddleware.cs
+========================================================
+
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
+
+namespace ReadService.Consolidado.API.Middlewares;
+
+public class AuthenticationContextMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (context.User.Identity?.IsAuthenticated == true)
+        {
+            context.Items["UsuarioId"] = context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "leitor-autenticado";
+        }
+        await next(context);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Consolidado/ReadService.Consolidado.API/Program.cs
+========================================================
+
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using ReadService.Consolidado.API.Application.Queries;
+using ReadService.Consolidado.API.Domain;
+using ReadService.Consolidado.API.Endpoints;
+using ReadService.Consolidado.API.Infrastructure;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSingleton<IConsolidadoQueryRepository, MongoConsolidadoRepository>();
+builder.Services.AddScoped<ObterSaldoConsolidadoQueryHandler>();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(opt => 
+    { 
+        opt.Authority = builder.Configuration["Keycloak:Authority"] ?? "http://localhost:8080/realms/banco-carrefour"; 
+        opt.RequireHttpsMetadata = false; 
+        opt.TokenValidationParameters.ValidateAudience = false; 
+    });
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("read", p => p.RequireRole("read", "admin"));
+
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseMiddleware<ReadService.Consolidado.API.Middlewares.AuthenticationContextMiddleware>();
+
+app.MapConsolidadoEndpoints();
+
+app.Run();
+
+
+========================================================
+FILE: ./src/ReadService.Extrato/ReadService.Extrato.API/Application/Queries/ObterExtratoQueryHandler.cs
+========================================================
+
+using ReadService.Extrato.API.Domain;
+
+namespace ReadService.Extrato.API.Application.Queries;
+
+public class ObterExtratoQueryHandler(IExtratoQueryRepository repository)
+{
+    public async Task<IEnumerable<ExtratoItemReadModel>> ExecutarAsync(Guid filialId, string data, CancellationToken ct = default)
+    {
+        return await repository.ObterExtratoPorFilialEDataAsync(filialId, data, ct);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Extrato/ReadService.Extrato.API/Domain/ExtratoReadModel.cs
+========================================================
+
+using MongoDB.Bson.Serialization.Attributes;
+
+namespace ReadService.Extrato.API.Domain;
+
+public class ExtratoItemReadModel
+{
+    [BsonId]
+    public Guid Id { get; set; }
+    public Guid FilialId { get; set; }
+    public string DataReferencia { get; set; } = string.Empty;
+    public DateTime DataLancamento { get; set; }
+    public decimal Valor { get; set; }
+    public int TipoOperacao { get; set; }
+    public string Descricao { get; set; } = string.Empty;
+    public string UsuarioId { get; set; } = string.Empty;
+}
+
+public interface IExtratoQueryRepository
+{
+    Task<IEnumerable<ExtratoItemReadModel>> ObterExtratoPorFilialEDataAsync(Guid filialId, string data, CancellationToken ct = default);
+}
+
+
+========================================================
+FILE: ./src/ReadService.Extrato/ReadService.Extrato.API/Endpoints/ExtratoEndpoints.cs
+========================================================
+
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using ReadService.Extrato.API.Application.Queries;
+
+namespace ReadService.Extrato.API.Endpoints;
+
+public static class ExtratoEndpoints
+{
+    public static void MapExtratoEndpoints(this IEndpointRouteBuilder endpoints)
+    {
+        endpoints.MapGet("/api/extrato/{filialId:guid}", ObterExtratoAsync)
+            .RequireAuthorization("read")
+            .WithTags("Consultas - Extrato Analítico")
+            .Produces<IEnumerable<object>>(StatusCodes.Status200OK)
+            .Produces(StatusCodes.Status400BadRequest);
+    }
+
+    private static async Task<IResult> ObterExtratoAsync(
+        Guid filialId,
+        string data,
+        ObterExtratoQueryHandler queryHandler,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(data))
+            return Results.BadRequest(new { mensagem = "O parametro 'data' (formato YYYY-MM-DD) e obrigatorio." });
+
+        var resultado = await queryHandler.ExecutarAsync(filialId, data, ct);
+        return Results.Ok(resultado);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Extrato/ReadService.Extrato.API/Infrastructure/MongoExtratoRepository.cs
+========================================================
+
+using Microsoft.Extensions.Configuration;
+using MongoDB.Driver;
+using ReadService.Extrato.API.Domain;
+
+namespace ReadService.Extrato.API.Infrastructure;
+
+public class MongoExtratoRepository : IExtratoQueryRepository
+{
+    private readonly IMongoCollection<ExtratoItemReadModel> _collection;
+
+    public MongoExtratoRepository(IConfiguration config)
+    {
+        var client = new MongoClient(config.GetConnectionString("MongoDb") ?? "mongodb://admin:adminpassword@localhost:27017");
+        var db = client.GetDatabase("fluxo_caixa_read_db");
+        _collection = db.GetCollection<ExtratoItemReadModel>("ExtratoLancamentos");
+    }
+
+    public async Task<IEnumerable<ExtratoItemReadModel>> ObterExtratoPorFilialEDataAsync(Guid filialId, string data, CancellationToken ct = default)
+    {
+        var filter = Builders<ExtratoItemReadModel>.Filter.And(
+            Builders<ExtratoItemReadModel>.Filter.Eq(x => x.FilialId, filialId),
+            Builders<ExtratoItemReadModel>.Filter.Eq(x => x.DataReferencia, data));
+
+        return await _collection.Find(filter)
+            .SortByDescending(x => x.DataLancamento)
+            .ToListAsync(ct);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Extrato/ReadService.Extrato.API/Middlewares/AuthenticationContextMiddleware.cs
+========================================================
+
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
+
+namespace ReadService.Extrato.API.Middlewares;
+
+public class AuthenticationContextMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (context.User.Identity?.IsAuthenticated == true)
+        {
+            context.Items["UsuarioId"] = context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "leitor-autenticado";
+        }
+        await next(context);
+    }
+}
+
+
+========================================================
+FILE: ./src/ReadService.Extrato/ReadService.Extrato.API/Program.cs
+========================================================
+
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using ReadService.Extrato.API.Application.Queries;
+using ReadService.Extrato.API.Domain;
+using ReadService.Extrato.API.Endpoints;
+using ReadService.Extrato.API.Infrastructure;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSingleton<IExtratoQueryRepository, MongoExtratoRepository>();
+builder.Services.AddScoped<ObterExtratoQueryHandler>();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(opt => 
+    { 
+        opt.Authority = builder.Configuration["Keycloak:Authority"] ?? "http://localhost:8080/realms/banco-carrefour"; 
+        opt.RequireHttpsMetadata = false; 
+        opt.TokenValidationParameters.ValidateAudience = false; 
+    });
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("read", p => p.RequireRole("read", "admin"));
+
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseMiddleware<ReadService.Extrato.API.Middlewares.AuthenticationContextMiddleware>();
+
+app.MapExtratoEndpoints();
+
+app.Run();
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.API/Endpoints/LancamentoEndpoints.cs
+========================================================
+
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using WriteService.Application.UseCases;
+
+namespace WriteService.API.Endpoints;
+
+public static class LancamentoEndpoints
+{
+    public static void MapLancamentoEndpoints(this IEndpointRouteBuilder endpoints)
+    {
+        var group = endpoints.MapGroup("/api/lancamentos")
+            .WithTags("Lançamentos Contábeis");
+
+        group.MapPost("/", CriarLancamentoAsync)
+            .RequireAuthorization("writer")
+            .Produces<LancamentoResponse>(StatusCodes.Status201Created)
+            .Produces(StatusCodes.Status400BadRequest);
+
+        group.MapPut("/{id:guid}", EditarLancamentoAsync)
+            .RequireAuthorization("admin")
+            .Produces<LancamentoResponse>(StatusCodes.Status200OK)
+            .Produces(StatusCodes.Status404NotFound);
+    }
+
+    private static async Task<IResult> CriarLancamentoAsync(
+        CriarLancamentoRequest request,
+        HttpContext httpContext,
+        LancamentoCommandService service,
+        CancellationToken ct)
+    {
+        var userId = httpContext.Items["UsuarioId"]?.ToString() ?? "sistema-operador";
+        var resultado = await service.CriarAsync(request, userId, ct);
+        return Results.Created($"/api/lancamentos/{resultado.Id}", resultado);
+    }
+
+    private static async Task<IResult> EditarLancamentoAsync(
+        Guid id,
+        EditarLancamentoRequest request,
+        HttpContext httpContext,
+        LancamentoCommandService service,
+        CancellationToken ct)
+    {
+        var userId = httpContext.Items["UsuarioId"]?.ToString() ?? "sistema-admin";
+        var resultado = await service.EditarAsync(id, request, userId, ct);
+        return Results.Ok(resultado);
+    }
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.API/Middlewares/AuthenticationContextMiddleware.cs
+========================================================
+
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
+
+namespace WriteService.API.Middlewares;
+
+public class AuthenticationContextMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (context.User.Identity?.IsAuthenticated == true)
+        {
+            var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "sistema-autenticado";
+            context.Items["UsuarioId"] = userId;
+        }
+
+        await next(context);
+    }
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.API/Program.cs
+========================================================
+
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using WriteService.API.Endpoints;
+using WriteService.API.Middlewares;
+using WriteService.Application.UseCases;
+using WriteService.Domain.Ports;
+using WriteService.Infrastructure.Adapters;
+using WriteService.Infrastructure.Persistence;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddDbContext<WriteDbContext>(opt =>
+    opt.UseNpgsql(builder.Configuration.GetConnectionString("Postgres") 
+        ?? "Host=postgres;Port=5432;Database=fluxo_caixa_db;Username=admin;Password=adminpassword"));
+
+builder.Services.AddScoped<ILancamentoRepository, LancamentoRepository>();
+builder.Services.AddSingleton<IEventProducer, KafkaEventProducer>();
+builder.Services.AddScoped<LancamentoCommandService>();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(opt =>
+    {
+        opt.Authority = builder.Configuration["Keycloak:Authority"] ?? "http://localhost:8080/realms/banco-carrefour";
+        opt.RequireHttpsMetadata = false;
+        opt.TokenValidationParameters.ValidateAudience = false;
+    });
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("writer", p => p.RequireRole("writer", "admin"))
+    .AddPolicy("admin", p => p.RequireRole("admin"));
+
+var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<WriteDbContext>();
+    db.Database.EnsureCreated();
+}
+
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseMiddleware<AuthenticationContextMiddleware>();
+
+app.MapLancamentoEndpoints();
+
+app.Run();
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.API/tests/BancoCarrefour.UnitTests/BancoCarrefour.UnitTests.csproj
+========================================================
+
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="NSubstitute" Version="6.2.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BuildingBlocks\BancoCarrefour.EventBus.Contracts\BancoCarrefour.EventBus.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\WriteService\WriteService.Domain\WriteService.Domain.csproj" />
+    <ProjectReference Include="..\..\src\WriteService\WriteService.Application\WriteService.Application.csproj" />
+    <ProjectReference Include="..\..\src\ConsolidationWorker\Worker.Domain\Worker.Domain.csproj" />
+    <ProjectReference Include="..\..\src\ConsolidationWorker\Worker.Application\Worker.Application.csproj" />
+  </ItemGroup>
+
+</Project>
+
+========================================================
+FILE: ./src/WriteService/WriteService.Application/UseCases/LancamentoCommandService.cs
+========================================================
+
+using BancoCarrefour.EventBus.Contracts;
+using WriteService.Domain.Entities;
+using WriteService.Domain.Ports;
+
+namespace WriteService.Application.UseCases;
+
+public record CriarLancamentoRequest(decimal Valor, string Descricao, Guid FilialId, Guid TipoLancamentoId);
+public record EditarLancamentoRequest(decimal NovoValor, string NovaDescricao, Guid NovoTipoLancamentoId);
+public record LancamentoResponse(Guid Id, decimal Valor, DateTime DataLancamento, string Descricao, Guid FilialId, TipoOperacao Operacao);
+
+public class LancamentoCommandService(ILancamentoRepository repository, IEventProducer eventProducer)
+{
+    public async Task<LancamentoResponse> CriarAsync(CriarLancamentoRequest request, string usuarioId, CancellationToken ct = default)
+    {
+        if (!await repository.FilialExisteAsync(request.FilialId, ct))
+            throw new InvalidOperationException($"Filial com ID {request.FilialId} nao encontrada no sistema.");
+
+        var tipoLancamento = await repository.ObterTipoLancamentoAsync(request.TipoLancamentoId, ct)
+            ?? throw new InvalidOperationException($"Tipo de lancamento contabil {request.TipoLancamentoId} nao encontrado.");
+
+        var lancamento = new Lancamento(request.Valor, request.Descricao, usuarioId, request.FilialId, request.TipoLancamentoId);
+        await repository.AdicionarAsync(lancamento, ct);
+
+        // Publica evento imutável para o Redpanda (Consolidação assíncrona)
+        var evento = new LancamentoCriadoEvent(
+            lancamento.Id, 
+            lancamento.FilialId, 
+            lancamento.Valor,
+            (TipoOperacaoEvento)tipoLancamento.Operacao, 
+            lancamento.Descricao,
+            lancamento.UsuarioId, 
+            lancamento.DataLancamento);
+
+        await eventProducer.PublicarAsync(lancamento.FilialId.ToString(), evento, ct);
+
+        return new LancamentoResponse(
+            lancamento.Id, 
+            lancamento.Valor, 
+            lancamento.DataLancamento, 
+            lancamento.Descricao, 
+            lancamento.FilialId, 
+            tipoLancamento.Operacao);
+    }
+
+    public async Task<LancamentoResponse> EditarAsync(Guid id, EditarLancamentoRequest request, string usuarioEditorId, CancellationToken ct = default)
+    {
+        var lancamento = await repository.ObterPorIdComTipoAsync(id, ct) 
+            ?? throw new KeyNotFoundException($"Lancamento {id} nao encontrado para edicao.");
+        
+        var novoTipo = await repository.ObterTipoLancamentoAsync(request.NovoTipoLancamentoId, ct) 
+            ?? throw new InvalidOperationException("Novo tipo de lancamento invalido.");
+
+        var valorAnterior = lancamento.Valor;
+        var operacaoAnterior = lancamento.TipoLancamento!.Operacao;
+
+        lancamento.Atualizar(request.NovoValor, request.NovaDescricao, request.NovoTipoLancamentoId, usuarioEditorId);
+        await repository.AtualizarAsync(lancamento, ct);
+
+        // Publica evento de retificação para recalcular deltas no worker
+        var evento = new LancamentoEditadoEvent(
+            lancamento.Id, 
+            lancamento.FilialId, 
+            valorAnterior, 
+            (TipoOperacaoEvento)operacaoAnterior,
+            lancamento.Valor, 
+            (TipoOperacaoEvento)novoTipo.Operacao, 
+            lancamento.Descricao,
+            usuarioEditorId, 
+            lancamento.DataLancamento, 
+            lancamento.UpdatedAtUtc ?? DateTime.UtcNow);
+
+        await eventProducer.PublicarAsync(lancamento.FilialId.ToString(), evento, ct);
+
+        return new LancamentoResponse(
+            lancamento.Id, 
+            lancamento.Valor, 
+            lancamento.DataLancamento, 
+            lancamento.Descricao, 
+            lancamento.FilialId, 
+            novoTipo.Operacao);
+    }
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Application/WriteService.Application.csproj
+========================================================
+
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\WriteService.Domain\WriteService.Domain.csproj" />
+    <ProjectReference Include="..\..\BuildingBlocks\BancoCarrefour.EventBus.Contracts\BancoCarrefour.EventBus.Contracts.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Domain/Entities/DomainModels.cs
+========================================================
+
+namespace WriteService.Domain.Entities;
+
+public abstract class EntityBase
+{
+    public Guid Id { get; protected set; } = Guid.NewGuid();
+    public DateTime CreatedAtUtc { get; protected set; } = DateTime.UtcNow;
+    public DateTime? UpdatedAtUtc { get; protected set; }
+}
+
+public enum TipoOperacao
+{
+    Debito = 0,
+    Credito = 1
+}
+
+public class Filial : EntityBase
+{
+    public string Nome { get; private set; } = string.Empty;
+    public string CodigoDocumento { get; private set; } = string.Empty;
+
+    protected Filial() { }
+
+    public Filial(Guid id, string nome, string codigoDocumento)
+    {
+        Id = id;
+        Nome = nome;
+        CodigoDocumento = codigoDocumento;
+    }
+}
+
+public class TipoLancamento : EntityBase
+{
+    public TipoOperacao Operacao { get; private set; }
+    public string Descricao { get; private set; } = string.Empty;
+
+    protected TipoLancamento() { }
+
+    public TipoLancamento(Guid id, TipoOperacao operacao, string descricao)
+    {
+        Id = id;
+        Operacao = operacao;
+        Descricao = descricao;
+    }
+}
+
+public class Lancamento : EntityBase
+{
+    public decimal Valor { get; private set; }
+    public DateTime DataLancamento { get; private set; }
+    public string Descricao { get; private set; } = string.Empty;
+    public string UsuarioId { get; private set; } = string.Empty;
+    public Guid FilialId { get; private set; }
+    public Guid TipoLancamentoId { get; private set; }
+
+    public Filial? Filial { get; private set; }
+    public TipoLancamento? TipoLancamento { get; private set; }
+
+    protected Lancamento() { }
+
+    public Lancamento(decimal valor, string descricao, string usuarioId, Guid filialId, Guid tipoLancamentoId)
+    {
+        Validar(valor, descricao, filialId, tipoLancamentoId);
+        Valor = valor;
+        DataLancamento = DateTime.UtcNow;
+        Descricao = descricao.Trim();
+        UsuarioId = usuarioId;
+        FilialId = filialId;
+        TipoLancamentoId = tipoLancamentoId;
+    }
+
+    public void Atualizar(decimal novoValor, string novaDescricao, Guid novoTipoLancamentoId, string usuarioEditorId)
+    {
+        Validar(novoValor, novaDescricao, FilialId, novoTipoLancamentoId);
+        Valor = novoValor;
+        Descricao = novaDescricao.Trim();
+        TipoLancamentoId = novoTipoLancamentoId;
+        UsuarioId = usuarioEditorId;
+        UpdatedAtUtc = DateTime.UtcNow;
+    }
+
+    private static void Validar(decimal valor, string descricao, Guid filialId, Guid tipoLancamentoId)
+    {
+        if (valor <= 0) throw new ArgumentException("O valor do lancamento contabil deve ser maior que zero.");
+        if (string.IsNullOrWhiteSpace(descricao)) throw new ArgumentException("A descricao e obrigatoria para auditoria.");
+        if (filialId == Guid.Empty) throw new ArgumentException("A Filial informada e invalida.");
+        if (tipoLancamentoId == Guid.Empty) throw new ArgumentException("O Tipo de Lancamento informado e invalido.");
+    }
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Domain/Ports/IEventProducer.cs
+========================================================
+
+namespace WriteService.Domain.Ports;
+
+public interface IEventProducer
+{
+    Task PublicarAsync<T>(string chave, T evento, CancellationToken ct = default) where T : class;
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Domain/Ports/ILancamentoRepository.cs
+========================================================
+
+using WriteService.Domain.Entities;
+
+namespace WriteService.Domain.Ports;
+
+public interface ILancamentoRepository
+{
+    Task<bool> FilialExisteAsync(Guid filialId, CancellationToken ct = default);
+    Task<TipoLancamento?> ObterTipoLancamentoAsync(Guid tipoId, CancellationToken ct = default);
+    Task<Lancamento?> ObterPorIdComTipoAsync(Guid id, CancellationToken ct = default);
+    Task AdicionarAsync(Lancamento lancamento, CancellationToken ct = default);
+    Task AtualizarAsync(Lancamento lancamento, CancellationToken ct = default);
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Domain/WriteService.Domain.csproj
+========================================================
+
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Infrastructure/Adapters/KafkaEventProducer.cs
+========================================================
+
+using System.Text.Json;
+using BancoCarrefour.EventBus.Contracts;
+using Confluent.Kafka;
+using Microsoft.Extensions.Configuration;
+using WriteService.Domain.Ports;
+
+namespace WriteService.Infrastructure.Adapters;
+
+public class KafkaEventProducer : IEventProducer
+{
+    private readonly IProducer<string, string> _producer;
+    private readonly string _topic;
+
+    public KafkaEventProducer(IConfiguration configuration)
+    {
+        var bootstrapServers = configuration["Kafka:BootstrapServers"] ?? "localhost:9092";
+        _topic = configuration["Kafka:Topic"] ?? "lancamentos-eventos";
+
+        var config = new ProducerConfig { BootstrapServers = bootstrapServers };
+        _producer = new ProducerBuilder<string, string>(config).Build();
+    }
+
+    public async Task PublicarAsync<T>(string chave, T evento, CancellationToken ct = default) where T : class
+    {
+        var envelope = new EnvelopeEvento(
+            typeof(T).Name,
+            JsonSerializer.Serialize(evento)
+        );
+
+        var message = new Message<string, string>
+        {
+            Key = chave,
+            Value = JsonSerializer.Serialize(envelope)
+        };
+
+        await _producer.ProduceAsync(_topic, message, ct);
+    }
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Infrastructure/Adapters/LancamentoRepository.cs
+========================================================
+
+using Microsoft.EntityFrameworkCore;
+using WriteService.Domain.Entities;
+using WriteService.Domain.Ports;
+using WriteService.Infrastructure.Persistence;
+
+namespace WriteService.Infrastructure.Adapters;
+
+public class LancamentoRepository(WriteDbContext context) : ILancamentoRepository
+{
+    public async Task<bool> FilialExisteAsync(Guid filialId, CancellationToken ct = default)
+    {
+        return await context.Filiais.AnyAsync(f => f.Id == filialId, ct);
+    }
+
+    public async Task<TipoLancamento?> ObterTipoLancamentoAsync(Guid tipoId, CancellationToken ct = default)
+    {
+        return await context.TiposLancamento.FindAsync([tipoId], ct);
+    }
+
+    public async Task<Lancamento?> ObterPorIdComTipoAsync(Guid id, CancellationToken ct = default)
+    {
+        return await context.Lancamentos
+            .Include(l => l.TipoLancamento)
+            .FirstOrDefaultAsync(l => l.Id == id, ct);
+    }
+
+    public async Task AdicionarAsync(Lancamento lancamento, CancellationToken ct = default)
+    {
+        await context.Lancamentos.AddAsync(lancamento, ct);
+        await context.SaveChangesAsync(ct);
+    }
+
+    public async Task AtualizarAsync(Lancamento lancamento, CancellationToken ct = default)
+    {
+        context.Lancamentos.Update(lancamento);
+        await context.SaveChangesAsync(ct);
+    }
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Infrastructure/Persistence/WriteDbContext.cs
+========================================================
+
+using Microsoft.EntityFrameworkCore;
+using WriteService.Domain.Entities;
+
+namespace WriteService.Infrastructure.Persistence;
+
+public class WriteDbContext(DbContextOptions<WriteDbContext> options) : DbContext(options)
+{
+    public DbSet<Lancamento> Lancamentos => Set<Lancamento>();
+    public DbSet<Filial> Filiais => Set<Filial>();
+    public DbSet<TipoLancamento> TiposLancamento => Set<TipoLancamento>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<Filial>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Nome).IsRequired().HasMaxLength(150);
+            entity.Property(e => e.CodigoDocumento).IsRequired().HasMaxLength(20);
+
+            // Seed Inicial para Testes Imediatos
+            entity.HasData(
+                new Filial(Guid.Parse("11111111-1111-1111-1111-111111111111"), "Carrefour Pinheiros - SP", "45.543.915/0001-81"),
+                new Filial(Guid.Parse("22222222-2222-2222-2222-222222222222"), "Carrefour Dom Pedro - Campinas", "45.543.915/0002-62")
+            );
+        });
+
+        modelBuilder.Entity<TipoLancamento>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Descricao).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Operacao).IsRequired();
+
+            // Seed Inicial de Operações Contábeis
+            entity.HasData(
+                new TipoLancamento(Guid.Parse("33333333-3333-3333-3333-333333333333"), TipoOperacao.Credito, "Venda PDV / Recebimento"),
+                new TipoLancamento(Guid.Parse("44444444-4444-4444-4444-444444444444"), TipoOperacao.Debito, "Pagamento Fornecedor / Sangria")
+            );
+        });
+
+        modelBuilder.Entity<Lancamento>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Valor).HasColumnType("decimal(18,2)").IsRequired();
+            entity.Property(e => e.Descricao).IsRequired().HasMaxLength(250);
+            entity.Property(e => e.UsuarioId).IsRequired().HasMaxLength(100);
+
+            entity.HasOne(e => e.Filial)
+                  .WithMany()
+                  .HasForeignKey(e => e.FilialId)
+                  .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.TipoLancamento)
+                  .WithMany()
+                  .HasForeignKey(e => e.TipoLancamentoId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+}
+
+
+========================================================
+FILE: ./src/WriteService/WriteService.Infrastructure/WriteService.Infrastructure.csproj
+========================================================
+
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\WriteService.Application\WriteService.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Confluent.Kafka" Version="2.16.0" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
