@@ -2,6 +2,14 @@
 
 Solução corporativa de engenharia de software para controle de lançamentos contábeis (Débito e Crédito) e consolidação diária de saldos por filial. O sistema foi projetado para alta disponibilidade, resiliência a picos de tráfego (50 requisições por segundo no consolidado diário com perda inferior a 5%) e desacoplamento total entre os contextos de escrita e leitura.
 
+## 📚 Documentação Executiva e Arquitetural Complementar
+
+Para aprofundamento técnico durante a avaliação, consulte os documentos detalhados na pasta [`docs/`](./docs):
+
+1. **[📜 Catálogo de Contratos das APIs e Eventos (`docs/CONTRATOS_APIS.md`)](./docs/CONTRATOS_APIS.md):** Especificação completa dos endpoints REST (`POST`, `PUT`, `GET`), payloads JSON, códigos de retorno HTTP, matriz RBAC do Keycloak e schemas dos eventos do Redpanda/Kafka.
+2. **[🏛️ Documento de Visão Arquitetural e ADRs (`docs/VISAO_ARQUITETURAL.md`)](./docs/VISAO_ARQUITETURAL.md):** Mapeamento de Requisitos Não-Funcionais (SLA de 50 req/s e isolamento de falhas), Modelo C4, Arquitetura Hexagonal e registo formal das decisões de engenharia (*Architecture Decision Records*).
+3. **[📊 Apresentação Executiva — Defesa da Solução (`docs/APRESENTACAO_EXECUTIVA.md`)](./docs/APRESENTACAO_EXECUTIVA.md):** Material executivo estruturado em slides justificando o retorno técnico e financeiro da arquitetura escolhida, comparativo com abordagens monolíticas e plano de escala Cloud-Native.
+
 ## 🏗️ 1. Visão Geral da Arquitetura
 
 A plataforma combina **Arquitetura Hexagonal (Ports & Adapters)**, **Domain-Driven Design (DDD)**, **CQRS (Command Query Responsibility Segregation)** e **Event-Driven Architecture (EDA)**:
