@@ -20,6 +20,9 @@ Para aprofundamento técnico durante a avaliação, consulte os documentos detal
 | **Pico de 50 req/s no Consolidado com menos de 5% de perda** | Atendido | Leitura O(1) por chave composta `_id` em documento pré-agregado no MongoDB (`< 5ms`). Validado em `./test-nfr-case.sh` (50 requisições concorrentes com `0%` de perda). |
 | **Segurança, Testes e Containerização** | Atendido | OAuth2/OIDC com **Keycloak 24** (`writer`, `read`, `admin`), testes `xUnit` e orquestração completa via `docker-compose.yml`. |
 
+4. **[Modelo de Dados Poliglota - PostgreSQL & MongoDB (`docs/MODELO_DADOS.md`)](./docs/MODELO_DADOS.md):** DDL relacional, colecoes MongoDB, Decimal128 e indices compostos.
+5. **[Especificacao de Topicos e Schemas Kafka/Redpanda (`docs/SCHEMAS_KAFKA.md`)](./docs/SCHEMAS_KAFKA.md):** Particionamento FIFO por FilialId, DLQ e contratos JSON Schema.
+
 ## 🏗️ 1. Visão Geral da Arquitetura
 
 A plataforma combina **Arquitetura Hexagonal (Ports & Adapters)**, **Domain-Driven Design (DDD)**, **CQRS (Command Query Responsibility Segregation)** e **Event-Driven Architecture (EDA)**:
