@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Configuration;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
+using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
 using Worker.Domain.Projections;
 
@@ -12,6 +14,12 @@ public class MongoProjectionRepository : IProjectionRepository
 
     static MongoProjectionRepository()
     {
+        try
+        {
+            BsonSerializer.RegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
+        }
+        catch (BsonSerializationException) { }
+
         if (!BsonClassMap.IsClassMapRegistered(typeof(SaldoDiarioDocument)))
         {
             BsonClassMap.RegisterClassMap<SaldoDiarioDocument>(cm =>
@@ -40,7 +48,6 @@ public class MongoProjectionRepository : IProjectionRepository
         _saldos = db.GetCollection<SaldoDiarioDocument>("SaldosDiarios");
         _extratos = db.GetCollection<ExtratoLancamentoDocument>("ExtratoLancamentos");
 
-        // Garante Índice Composto para consultas rápidas de Extrato
         var indexKeys = Builders<ExtratoLancamentoDocument>.IndexKeys
             .Ascending(x => x.FilialId)
             .Ascending(x => x.DataReferencia)
@@ -50,7 +57,6 @@ public class MongoProjectionRepository : IProjectionRepository
 
     public async Task ProcessarCriacaoAsync(ExtratoLancamentoDocument lancamento, decimal deltaCredito, decimal deltaDebito, CancellationToken ct = default)
     {
-        // Idempotência: substitui ou insere no extrato
         await _extratos.ReplaceOneAsync(
             x => x.Id == lancamento.Id,
             lancamento,

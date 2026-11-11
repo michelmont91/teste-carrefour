@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using WriteService.API.Endpoints;
 using WriteService.API.Middlewares;
 using WriteService.Application.UseCases;
@@ -11,7 +12,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddDbContext<WriteDbContext>(opt =>
     opt.UseNpgsql(builder.Configuration.GetConnectionString("Postgres") 
-        ?? "Host=postgres;Port=5432;Database=fluxo_caixa_db;Username=admin;Password=adminpassword"));
+        ?? "Host=postgres;Port=5432;Database=banco_carrefour;Username=postgres;Password=postgres"));
 
 builder.Services.AddScoped<ILancamentoRepository, LancamentoRepository>();
 builder.Services.AddSingleton<IEventProducer, KafkaEventProducer>();
@@ -20,9 +21,19 @@ builder.Services.AddScoped<LancamentoCommandService>();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(opt =>
     {
-        opt.Authority = builder.Configuration["Keycloak:Authority"] ?? "http://localhost:8080/realms/banco-carrefour";
-        opt.RequireHttpsMetadata = false;
-        opt.TokenValidationParameters.ValidateAudience = false;
+        opt.Authority = builder.Configuration["Keycloak:Authority"] ?? "http://keycloak:8080/realms/banco-carrefour";
+        opt.RequireHttpsMetadata = false; opt.MapInboundClaims = false;
+        opt.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateAudience = false,
+            ValidateIssuer = true,
+            ValidIssuers = new[]
+            {
+                "http://localhost:8080/realms/banco-carrefour",
+                "http://keycloak:8080/realms/banco-carrefour"
+            },
+            RoleClaimType = "roles"
+        };
     });
 
 builder.Services.AddAuthorizationBuilder()

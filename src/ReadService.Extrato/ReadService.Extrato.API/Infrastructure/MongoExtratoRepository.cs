@@ -1,4 +1,7 @@
 using Microsoft.Extensions.Configuration;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
+using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
 using ReadService.Extrato.API.Domain;
 
@@ -7,6 +10,15 @@ namespace ReadService.Extrato.API.Infrastructure;
 public class MongoExtratoRepository : IExtratoQueryRepository
 {
     private readonly IMongoCollection<ExtratoItemReadModel> _collection;
+
+    static MongoExtratoRepository()
+    {
+        try
+        {
+            BsonSerializer.RegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
+        }
+        catch (BsonSerializationException) { }
+    }
 
     public MongoExtratoRepository(IConfiguration config)
     {

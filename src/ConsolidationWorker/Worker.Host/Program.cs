@@ -7,7 +7,6 @@ using Worker.Infrastructure.Messaging;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-// Registo de Portas e Adaptadores (Arquitetura Hexagonal)
 builder.Services.AddSingleton<IProjectionRepository, MongoProjectionRepository>();
 builder.Services.AddSingleton<ConsolidacaoProcessor>();
 builder.Services.AddHostedService<KafkaConsolidacaoWorker>();

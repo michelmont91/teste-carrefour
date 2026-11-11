@@ -1,65 +1,105 @@
-version: '3.8'
+networks:
+  carrefour-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mongo_data:
 
 services:
-  # ==========================================
-  # INFRAESTRUTURA
-  # ==========================================
   postgres:
     image: postgres:16-alpine
     container_name: bc-postgres
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: adminpassword
-      POSTGRES_DB: fluxo_caixa_db
+      POSTGRES_DB: banco_carrefour
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     networks:
       - carrefour-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d banco_carrefour"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   mongodb:
     image: mongo:7.0
     container_name: bc-mongodb
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: adminpassword
     ports:
       - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
     networks:
       - carrefour-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v23.3.3
     container_name: bc-redpanda
     command:
-      - redpanda start
+      - redpanda
+      - start
       - --overprovisioned
-      - --smp 1
-      - --memory 1G
-      - --reserve-memory 0M
-      - --node-id 0
+      - --smp
+      - "1"
+      - --memory
+      - "512M"
+      - --reserve-memory
+      - "0M"
+      - --node-id
+      - "0"
       - --check=false
-      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
-      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:19092
     ports:
       - "9092:9092"
+      - "19092:19092"
       - "9644:9644"
     networks:
       - carrefour-net
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
 
   redpanda-init:
     image: docker.redpanda.com/redpandadata/redpanda:v23.3.3
     container_name: bc-redpanda-init
     depends_on:
-      - redpanda
+      redpanda:
+        condition: service_healthy
     entrypoint: [ "/bin/sh", "-c" ]
-    command: |
-      "
-      echo 'Aguardando o Redpanda iniciar...'
-      sleep 5
-      rpk topic create lancamentos-eventos --brokers redpanda:29092 --partitions 3 --replicas 1 || true
-      rpk topic create lancamentos-dlq --brokers redpanda:29092 --partitions 1 --replicas 1 || true
-      echo 'Topicos criados com sucesso!'
-      "
+    command:
+      - |
+        rpk topic create lancamentos-eventos --brokers=redpanda:9092 || true
+        echo "Topico lancamentos-eventos garantido com sucesso!"
+    networks:
+      - carrefour-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: bc-keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    command:
+      - start-dev
+      - --import-realm
+    volumes:
+      - ./docker/keycloak-realm.json:/opt/keycloak/data/import/keycloak-realm.json:ro
+    ports:
+      - "8080:8080"
     networks:
       - carrefour-net
 
@@ -67,63 +107,52 @@ services:
     image: provectuslabs/kafka-ui:latest
     container_name: bc-kafka-ui
     depends_on:
-      - redpanda
+      redpanda:
+        condition: service_healthy
     ports:
       - "8085:8080"
     environment:
-      KAFKA_CLUSTERS_0_NAME: banco-carrefour-redpanda
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:29092
+      KAFKA_CLUSTERS_0_NAME: 'Redpanda-Local'
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'redpanda:9092'
     networks:
       - carrefour-net
 
-  keycloak:
-    image: quay.io/keycloak/keycloak:24.0
-    container_name: bc-keycloak
-    command: start-dev
-    environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
-    ports:
-      - "8080:8080"
-    networks:
-      - carrefour-net
-
-  # ==========================================
-  # MICROSSERVIÇOS .NET
-  # ==========================================
   writeservice.api:
     build:
       context: .
       dockerfile: src/WriteService/WriteService.API/Dockerfile
     container_name: bc-writeservice-api
+    restart: on-failure
     depends_on:
-      - postgres
-      - redpanda
-    ports:
-      - "5001:8080"
+      postgres:
+        condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
-      - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=fluxo_caixa_db;Username=admin;Password=adminpassword
-      - Kafka__BootstrapServers=redpanda:29092
-      - Kafka__Topic=lancamentos-eventos
+      - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=banco_carrefour;Username=postgres;Password=postgres
+      - Kafka__BootstrapServers=redpanda:9092
       - Keycloak__Authority=http://keycloak:8080/realms/banco-carrefour
+    ports:
+      - "5001:8080"
     networks:
       - carrefour-net
 
-  consolidation.worker:
+  consolidation_worker:
     build:
       context: .
       dockerfile: src/ConsolidationWorker/Worker.Host/Dockerfile
     container_name: bc-consolidation-worker
+    restart: on-failure
     depends_on:
-      - mongodb
-      - redpanda
+      mongodb:
+        condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
     environment:
       - DOTNET_ENVIRONMENT=Development
-      - ConnectionStrings__MongoDb=mongodb://admin:adminpassword@mongodb:27017
-      - Kafka__BootstrapServers=redpanda:29092
-      - Kafka__Topic=lancamentos-eventos
-      - Kafka__DlqTopic=lancamentos-dlq
+      - ConnectionStrings__MongoDb=mongodb://mongodb:27017
+      - Kafka__BootstrapServers=redpanda:9092
     networks:
       - carrefour-net
 
@@ -132,14 +161,16 @@ services:
       context: .
       dockerfile: src/ReadService.Consolidado/ReadService.Consolidado.API/Dockerfile
     container_name: bc-read-consolidado-api
+    restart: on-failure
     depends_on:
-      - mongodb
-    ports:
-      - "5002:8080"
+      mongodb:
+        condition: service_healthy
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
-      - ConnectionStrings__MongoDb=mongodb://admin:adminpassword@mongodb:27017
+      - ConnectionStrings__MongoDb=mongodb://mongodb:27017
       - Keycloak__Authority=http://keycloak:8080/realms/banco-carrefour
+    ports:
+      - "5002:8080"
     networks:
       - carrefour-net
 
@@ -148,17 +179,15 @@ services:
       context: .
       dockerfile: src/ReadService.Extrato/ReadService.Extrato.API/Dockerfile
     container_name: bc-read-extrato-api
+    restart: on-failure
     depends_on:
-      - mongodb
-    ports:
-      - "5003:8080"
+      mongodb:
+        condition: service_healthy
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
-      - ConnectionStrings__MongoDb=mongodb://admin:adminpassword@mongodb:27017
+      - ConnectionStrings__MongoDb=mongodb://mongodb:27017
       - Keycloak__Authority=http://keycloak:8080/realms/banco-carrefour
+    ports:
+      - "5003:8080"
     networks:
       - carrefour-net
-
-networks:
-  carrefour-net:
-    driver: bridge

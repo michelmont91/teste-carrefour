@@ -1,9 +1,10 @@
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
-WORKDIR /src
+WORKDIR /source
 COPY . .
-RUN dotnet publish src/ConsolidationWorker/Worker.Host/Worker.Host.csproj -c Release -o /app/publish
+WORKDIR /source/src/ConsolidationWorker/Worker.Host
+RUN dotnet publish Worker.Host.csproj -c Release -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/runtime:9.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:9.0
 WORKDIR /app
 COPY --from=build /app/publish .
 ENTRYPOINT ["dotnet", "Worker.Host.dll"]
