@@ -10,6 +10,16 @@ Para aprofundamento técnico durante a avaliação, consulte os documentos detal
 2. **[🏛️ Documento de Visão Arquitetural e ADRs (`docs/VISAO_ARQUITETURAL.md`)](./docs/VISAO_ARQUITETURAL.md):** Mapeamento de Requisitos Não-Funcionais (SLA de 50 req/s e isolamento de falhas), Modelo C4, Arquitetura Hexagonal e registo formal das decisões de engenharia (*Architecture Decision Records*).
 3. **[📊 Apresentação Executiva — Defesa da Solução (`docs/APRESENTACAO_EXECUTIVA.md`)](./docs/APRESENTACAO_EXECUTIVA.md):** Material executivo estruturado em slides justificando o retorno técnico e financeiro da arquitetura escolhida, comparativo com abordagens monolíticas e plano de escala Cloud-Native.
 
+## ✅ Matriz de Conformidade com o Documento do Case
+
+| Requisito Oficial do Desafio | Status | Implementação e Comprovação Prática |
+| :--- | :--- | :--- |
+| **Controle de Lançamentos (Débito e Crédito)** | Atendido | `WriteService.API` (`POST` e `PUT /api/lancamentos`) com invariantes de domínio e PostgreSQL 16. |
+| **Consolidação Diária de Saldos** | Atendido | `ConsolidationWorker` processando eventos via Redpanda e projetando no MongoDB (`SaldosDiarios` e `ExtratoLancamentos`). |
+| **Indisponibilidade do Consolidado não afeta Lançamentos** | Atendido | Isolamento físico e assíncrono via **CQRS + Redpanda**. Validado automaticamente em `./test-nfr-case.sh` (para o consolidado e efetua `POST` retornando `201 Created`). |
+| **Pico de 50 req/s no Consolidado com menos de 5% de perda** | Atendido | Leitura O(1) por chave composta `_id` em documento pré-agregado no MongoDB (`< 5ms`). Validado em `./test-nfr-case.sh` (50 requisições concorrentes com `0%` de perda). |
+| **Segurança, Testes e Containerização** | Atendido | OAuth2/OIDC com **Keycloak 24** (`writer`, `read`, `admin`), testes `xUnit` e orquestração completa via `docker-compose.yml`. |
+
 ## 🏗️ 1. Visão Geral da Arquitetura
 
 A plataforma combina **Arquitetura Hexagonal (Ports & Adapters)**, **Domain-Driven Design (DDD)**, **CQRS (Command Query Responsibility Segregation)** e **Event-Driven Architecture (EDA)**:

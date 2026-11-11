@@ -106,3 +106,17 @@ Dentro do `WriteService` e do `ConsolidationWorker`, o código é organizado em 
 * **Decisão:** Isolar `ReadService.Consolidado.API` (Porta `5002`) e `ReadService.Extrato.API` (Porta `5003`) em processos e contentores independentes.
 * **Consequências:**
   * *Positivas:* Permite escalar horizontalmente (ex.: HPA no Kubernetes) apenas os *pods* do `Consolidado.API` durante picos de fecho de caixa, sem competir por CPU/memória de serialização JSON com relatórios pesados de extrato.
+
+---
+
+## 🚀 5. Roadmap de Evolução para Produção Corporativa (Cloud-Native)
+
+Embora a solução atual atenda integralmente aos requisitos funcionais e não-funcionais do case em ambiente containerizado, o desenho arquitetural prevê três evoluções naturais para operação crítica em larga escala:
+
+1. **Transactional Outbox Pattern (Garantia Dual-Write no WriteService):**
+   * *Contexto:* Evitar inconsistência caso o banco PostgreSQL confirme a transação (`Commit`), mas ocorra uma falha de rede exata no milissegundo anterior ao `ProduceAsync` no Redpanda.
+   * *Evolução:* Gravar o evento numa tabela `OutboxMessages` na mesma transação ACID do `WriteDbContext` e utilizar um *Relay Worker* ou **Debezium CDC (Change Data Capture)** para publicar no Redpanda.
+2. **Observabilidade Distribuída (OpenTelemetry + Prometheus + Grafana):**
+   * Instrumentação nativa do .NET 9 via `System.Diagnostics.Activity` propagando o `traceparent` nos cabeçalhos HTTP e nos headers das mensagens Kafka/Redpanda para rastrear a latência fim a fim desde o PDV até a projeção no MongoDB.
+3. **Auto-Scaling Orientado a Eventos (KEDA + HPA no Kubernetes):**
+   * Escalonamento horizontal automático do `ConsolidationWorker` via **KEDA** com base na métrica de *Consumer Lag* do tópico `lancamentos-eventos`, e escalonamento do `ReadService.Consolidado.API` via **HPA** com base em RPS/CPU.
